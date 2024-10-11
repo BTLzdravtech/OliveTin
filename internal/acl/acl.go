@@ -4,6 +4,7 @@ import (
 	"context"
 	config "github.com/OliveTin/OliveTin/internal/config"
 	log "github.com/sirupsen/logrus"
+	"strings"
 
 	"golang.org/x/exp/slices"
 	"google.golang.org/grpc/metadata"
@@ -180,10 +181,11 @@ func buildUserAcls(cfg *config.Config, user *AuthenticatedUser) {
 			continue
 		}
 
-		if slices.Contains(acl.MatchUsergroups, user.Usergroup) {
-			user.acls = append(user.acls, acl.Name)
-			continue
-
+		for _, usergroup := range strings.Split(user.Usergroup, ",") {
+			if slices.Contains(acl.MatchUsergroups, usergroup) {
+				user.acls = append(user.acls, acl.Name)
+				continue
+			}
 		}
 	}
 }

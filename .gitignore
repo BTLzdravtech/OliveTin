@@ -13,3 +13,4 @@ webui/
 webui.dev/node_modules
 webui.dev/.parcel-cache
 custom-webui
+.idea
