@@ -21,7 +21,7 @@ type Action struct {
 	ExecOnFileCreatedInDir []string
 	ExecOnFileChangedInDir []string
 	ExecOnCalendarFile     string
-	Trigger                string
+	Triggers               []string
 	MaxConcurrent          int
 	MaxRate                []RateSpec
 	Arguments              []ActionArgument
@@ -96,6 +96,7 @@ type Config struct {
 	ExternalRestAddress             string
 	LogLevel                        string
 	LogDebugOptions                 LogDebugOptions
+	LogHistoryPageSize              int64
 	Actions                         []*Action             `mapstructure:"actions"`
 	Entities                        []*EntityFile         `mapstructure:"entities"`
 	Dashboards                      []*DashboardComponent `mapstructure:"dashboards"`
@@ -115,6 +116,11 @@ type Config struct {
 	AuthJwtPubKeyPath               string // will read pub key from file on disk
 	AuthHttpHeaderUsername          string
 	AuthHttpHeaderUserGroup         string
+	AuthLocalUsers                  AuthLocalUsersConfig
+	AuthLoginUrl                    string
+	AuthRequireGuestsToLogin        bool
+	AuthOAuth2RedirectURL           string
+	AuthOAuth2Providers             map[string]*OAuth2Provider
 	DefaultPermissions              PermissionsList
 	AccessControlLists              []*AccessControlList
 	WebUIDir                        string
@@ -130,8 +136,43 @@ type Config struct {
 	DefaultIconForActions           string
 	DefaultIconForDirectories       string
 	DefaultIconForBack              string
+	AdditionalNavigationLinks       []*NavigationLink
 
 	usedConfigDir string
+}
+
+type AuthLocalUsersConfig struct {
+	Enabled bool
+	Users   []*LocalUser
+}
+
+type LocalUser struct {
+	Username  string
+	Usergroup string
+	Password  string
+}
+
+type OAuth2Provider struct {
+	Name               string
+	Title              string
+	ClientID           string
+	ClientSecret       string
+	Icon               string
+	Scopes             []string
+	AuthUrl            string
+	TokenUrl           string
+	WhoamiUrl          string
+	UsernameField      string
+	UserGroupField     string
+	InsecureSkipVerify bool
+	CallbackTimeout    int
+	CertBundlePath     string
+}
+
+type NavigationLink struct {
+	Title  string
+	Url    string
+	Target string
 }
 
 type SaveLogsConfig struct {
@@ -142,6 +183,7 @@ type SaveLogsConfig struct {
 type LogDebugOptions struct {
 	SingleFrontendRequests       bool
 	SingleFrontendRequestHeaders bool
+	AclCheckStarted              bool
 	AclMatched                   bool
 	AclNotMatched                bool
 	AclNoneMatched               bool
@@ -171,12 +213,14 @@ func DefaultConfigWithBasePort(basePort int) *Config {
 	config.EnableCustomJs = false
 	config.ExternalRestAddress = "."
 	config.LogLevel = "INFO"
+	config.LogHistoryPageSize = 10
 	config.CheckForUpdates = false
 	config.DefaultPermissions.Exec = true
 	config.DefaultPermissions.View = true
 	config.DefaultPermissions.Logs = true
 	config.AuthJwtClaimUsername = "name"
 	config.AuthJwtClaimUserGroup = "group"
+	config.AuthRequireGuestsToLogin = false
 	config.WebUIDir = "./webui"
 	config.CronSupportForSeconds = false
 	config.SectionNavigationStyle = "sidebar"

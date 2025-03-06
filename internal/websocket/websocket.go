@@ -1,14 +1,15 @@
 package websocket
 
 import (
+	"net/http"
+	"sync"
+
 	pb "github.com/OliveTin/OliveTin/gen/grpc"
 	"github.com/OliveTin/OliveTin/internal/executor"
 	ws "github.com/gorilla/websocket"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"net/http"
-	"sync"
 )
 
 var upgrader = ws.Upgrader{
@@ -34,13 +35,10 @@ var ExecutionListener WebsocketExecutionListener
 
 type WebsocketExecutionListener struct{}
 
-func (WebsocketExecutionListener) OnExecutionStarted(title string) {
-	/*
-		broadcast(ExecutionStarted{
-			Type: "ExecutionStarted",
-			Action: title,
-		});
-	*/
+func (WebsocketExecutionListener) OnExecutionStarted(ile *executor.InternalLogEntry) {
+	broadcast(&pb.EventExecutionStarted{
+		LogEntry: internalLogEntryToPb(ile),
+	})
 }
 
 func OnEntityChanged() {
@@ -81,22 +79,10 @@ func (WebsocketExecutionListener) OnOutputChunk(chunk []byte, executionTrackingI
 
 func (WebsocketExecutionListener) OnExecutionFinished(logEntry *executor.InternalLogEntry) {
 	evt := &pb.EventExecutionFinished{
-		LogEntry: &pb.LogEntry{
-			ActionTitle:         logEntry.ActionTitle,
-			ActionIcon:          logEntry.ActionIcon,
-			ActionId:            logEntry.ActionId,
-			DatetimeStarted:     logEntry.DatetimeStarted.Format("2006-01-02 15:04:05"),
-			DatetimeFinished:    logEntry.DatetimeFinished.Format("2006-01-02 15:04:05"),
-			Output:              logEntry.Output,
-			TimedOut:            logEntry.TimedOut,
-			Blocked:             logEntry.Blocked,
-			ExitCode:            logEntry.ExitCode,
-			Tags:                logEntry.Tags,
-			ExecutionTrackingId: logEntry.ExecutionTrackingID,
-			ExecutionStarted:    logEntry.ExecutionStarted,
-			ExecutionFinished:   logEntry.ExecutionFinished,
-		},
+		LogEntry: internalLogEntryToPb(logEntry),
 	}
+
+	log.Infof("WS Execution finished: %v", evt.LogEntry)
 
 	broadcast(evt)
 }
@@ -173,4 +159,23 @@ func HandleWebsocket(w http.ResponseWriter, r *http.Request) bool {
 	go wsclient.messageLoop()
 
 	return true
+}
+
+func internalLogEntryToPb(logEntry *executor.InternalLogEntry) *pb.LogEntry {
+	return &pb.LogEntry{
+		ActionTitle:         logEntry.ActionTitle,
+		ActionIcon:          logEntry.ActionIcon,
+		ActionId:            logEntry.ActionId,
+		DatetimeStarted:     logEntry.DatetimeStarted.Format("2006-01-02 15:04:05"),
+		DatetimeFinished:    logEntry.DatetimeFinished.Format("2006-01-02 15:04:05"),
+		Output:              logEntry.Output,
+		TimedOut:            logEntry.TimedOut,
+		Blocked:             logEntry.Blocked,
+		ExitCode:            logEntry.ExitCode,
+		Tags:                logEntry.Tags,
+		ExecutionTrackingId: logEntry.ExecutionTrackingID,
+		ExecutionStarted:    logEntry.ExecutionStarted,
+		ExecutionFinished:   logEntry.ExecutionFinished,
+		User:                logEntry.Username,
+	}
 }

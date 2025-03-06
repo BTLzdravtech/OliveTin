@@ -2,6 +2,7 @@ package acl
 
 import (
 	"context"
+
 	config "github.com/OliveTin/OliveTin/internal/config"
 	log "github.com/sirupsen/logrus"
 	"strings"
@@ -27,7 +28,14 @@ type AuthenticatedUser struct {
 	Username  string
 	Usergroup string
 
-	acls []string
+	Provider string
+	SID      string
+
+	Acls []string
+}
+
+func (u *AuthenticatedUser) IsGuest() bool {
+	return u.Username == "guest" && u.Provider == "system"
 }
 
 func logAclNotMatched(cfg *config.Config, aclFunction string, user *AuthenticatedUser, action *config.Action, acl *config.AccessControlList) {
@@ -80,13 +88,15 @@ func permissionsConfigToBits(permissions config.PermissionsList) PermissionBits 
 func aclCheck(requiredPermission PermissionBits, defaultValue bool, cfg *config.Config, aclFunction string, user *AuthenticatedUser, action *config.Action) bool {
 	relevantAcls := getRelevantAcls(cfg, action.Acls, user)
 
-	log.WithFields(log.Fields{
-		"actionTitle":        action.Title,
-		"username":           user.Username,
-		"usergroup":          user.Usergroup,
-		"relevantAcls":       len(relevantAcls),
-		"requiredPermission": requiredPermission,
-	}).Debugf("ACL check - %v", aclFunction)
+	if cfg.LogDebugOptions.AclCheckStarted {
+		log.WithFields(log.Fields{
+			"actionTitle":        action.Title,
+			"username":           user.Username,
+			"usergroup":          user.Usergroup,
+			"relevantAcls":       len(relevantAcls),
+			"requiredPermission": requiredPermission,
+		}).Debugf("ACL check - %v", aclFunction)
+	}
 
 	for _, acl := range relevantAcls {
 		permissionBits := permissionsConfigToBits(acl.Permissions)
@@ -136,29 +146,40 @@ func getMetadataKeyOrEmpty(md metadata.MD, key string) string {
 
 // UserFromContext tries to find a user from a grpc context
 func UserFromContext(ctx context.Context, cfg *config.Config) *AuthenticatedUser {
-	ret := &AuthenticatedUser{}
+	var ret *AuthenticatedUser
 
 	md, ok := metadata.FromIncomingContext(ctx)
 
 	if ok {
+		ret = &AuthenticatedUser{}
 		ret.Username = getMetadataKeyOrEmpty(md, "username")
 		ret.Usergroup = getMetadataKeyOrEmpty(md, "usergroup")
+		ret.Provider = getMetadataKeyOrEmpty(md, "provider")
+
+		buildUserAcls(cfg, ret)
 	}
 
-	if ret.Username == "" {
-		ret.Username = "guest"
+	if !ok || ret.Username == "" {
+		ret = UserGuest(cfg)
 	}
-
-	if ret.Usergroup == "" {
-		ret.Usergroup = "guest"
-	}
-
-	buildUserAcls(cfg, ret)
 
 	log.WithFields(log.Fields{
 		"username":  ret.Username,
 		"usergroup": ret.Usergroup,
+		"provider":  ret.Provider,
+		"acls":      ret.Acls,
 	}).Debugf("UserFromContext")
+
+	return ret
+}
+
+func UserGuest(cfg *config.Config) *AuthenticatedUser {
+	ret := &AuthenticatedUser{}
+	ret.Username = "guest"
+	ret.Usergroup = "guest"
+	ret.Provider = "system"
+
+	buildUserAcls(cfg, ret)
 
 	return ret
 }
@@ -167,6 +188,7 @@ func UserFromSystem(cfg *config.Config, username string) *AuthenticatedUser {
 	ret := &AuthenticatedUser{
 		Username:  username,
 		Usergroup: "system",
+		Provider:  "system",
 	}
 
 	buildUserAcls(cfg, ret)
@@ -177,13 +199,13 @@ func UserFromSystem(cfg *config.Config, username string) *AuthenticatedUser {
 func buildUserAcls(cfg *config.Config, user *AuthenticatedUser) {
 	for _, acl := range cfg.AccessControlLists {
 		if slices.Contains(acl.MatchUsernames, user.Username) {
-			user.acls = append(user.acls, acl.Name)
+			user.Acls = append(user.Acls, acl.Name)
 			continue
 		}
 
 		for _, usergroup := range strings.Split(user.Usergroup, ",") {
 			if slices.Contains(acl.MatchUsergroups, usergroup) {
-				user.acls = append(user.acls, acl.Name)
+				user.Acls = append(user.Acls, acl.Name)
 				continue
 			}
 		}
@@ -191,7 +213,7 @@ func buildUserAcls(cfg *config.Config, user *AuthenticatedUser) {
 }
 
 func isACLRelevantToAction(cfg *config.Config, actionAcls []string, acl *config.AccessControlList, user *AuthenticatedUser) bool {
-	if !slices.Contains(user.acls, acl.Name) {
+	if !slices.Contains(user.Acls, acl.Name) {
 		// If the user does not have this ACL, then it is not relevant
 
 		return false

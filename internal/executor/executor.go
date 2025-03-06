@@ -37,8 +37,9 @@ type ActionBinding struct {
 // Executor represents a helper class for executing commands. It's main method
 // is ExecRequest
 type Executor struct {
-	logs           map[string]*InternalLogEntry
-	LogsByActionId map[string][]*InternalLogEntry
+	logs                  map[string]*InternalLogEntry
+	logsTrackingIdsByDate []string
+	LogsByActionId        map[string][]*InternalLogEntry
 
 	logmutex sync.RWMutex
 
@@ -84,6 +85,8 @@ type InternalLogEntry struct {
 	ExecutionFinished   bool
 	ExecutionTrackingID string
 	Process             *os.Process
+	Username            string
+	Index               int64
 
 	/*
 		The following 3 properties are obviously on Action normally, but it's useful
@@ -103,6 +106,7 @@ func DefaultExecutor(cfg *config.Config) *Executor {
 	e := Executor{}
 	e.Cfg = cfg
 	e.logs = make(map[string]*InternalLogEntry)
+	e.logsTrackingIdsByDate = make([]string, 0)
 	e.LogsByActionId = make(map[string][]*InternalLogEntry)
 	e.MapActionIdToBinding = make(map[string]*ActionBinding)
 
@@ -124,7 +128,7 @@ func DefaultExecutor(cfg *config.Config) *Executor {
 }
 
 type listener interface {
-	OnExecutionStarted(actionTitle string)
+	OnExecutionStarted(logEntry *InternalLogEntry)
 	OnExecutionFinished(logEntry *InternalLogEntry)
 	OnOutputChunk(o []byte, executionTrackingId string)
 	OnActionMapRebuilt()
@@ -134,18 +138,62 @@ func (e *Executor) AddListener(m listener) {
 	e.listeners = append(e.listeners, m)
 }
 
-func (e *Executor) GetLogsCopy() map[string]*InternalLogEntry {
+// getPagingStartIndex calculates the starting index for log pagination.
+// Parameters:
+//
+//	startOffset: The offset from the most recent log (0 means start from the most recent)
+//	totalLogCount: Total number of logs available
+//	count: Number of logs to retrieve
+//
+// Returns: The calculated starting index for pagination
+func getPagingStartIndex(startOffset int64, totalLogCount int64, count int64) int64 {
+	var startIndex int64
+
+	if startOffset <= 0 {
+		startIndex = totalLogCount
+	} else {
+		startIndex = (totalLogCount - startOffset)
+
+		if startIndex < 0 {
+			startIndex = 1
+		}
+	}
+
+	return startIndex - 1
+}
+
+func (e *Executor) GetLogTrackingIds(startOffset int64, pageCount int64) ([]*InternalLogEntry, int64) {
 	e.logmutex.RLock()
 
-	copy := make(map[string]*InternalLogEntry)
+	totalLogCount := int64(len(e.logsTrackingIdsByDate))
 
-	for k, v := range e.logs {
-		copy[k] = v
+	startIndex := getPagingStartIndex(startOffset, totalLogCount, pageCount)
+
+	pageCount = min(totalLogCount, pageCount)
+
+	endIndex := max(0, (startIndex-pageCount)+1)
+
+	log.WithFields(log.Fields{
+		"startOffset": startOffset,
+		"pageCount":   pageCount,
+		"total":       totalLogCount,
+		"startIndex":  startIndex,
+		"endIndex":    endIndex,
+	}).Tracef("GetLogTrackingIds")
+
+	trackingIds := make([]*InternalLogEntry, 0, pageCount)
+
+	if totalLogCount > 0 {
+		for i := endIndex; i <= startIndex; i++ {
+			trackingIds = append(trackingIds, e.logs[e.logsTrackingIdsByDate[i]])
+		}
 	}
 
 	e.logmutex.RUnlock()
 
-	return copy
+	remainingLogs := endIndex
+
+	return trackingIds, remainingLogs
 }
 
 func (e *Executor) GetLog(trackingID string) (*InternalLogEntry, bool) {
@@ -175,13 +223,20 @@ func (e *Executor) GetLogsByActionId(actionId string) []*InternalLogEntry {
 func (e *Executor) SetLog(trackingID string, entry *InternalLogEntry) {
 	e.logmutex.Lock()
 
+	entry.Index = int64(len(e.logsTrackingIdsByDate))
+
 	e.logs[trackingID] = entry
+	e.logsTrackingIdsByDate = append(e.logsTrackingIdsByDate, trackingID)
 
 	e.logmutex.Unlock()
 }
 
 // ExecRequest processes an ExecutionRequest
 func (e *Executor) ExecRequest(req *ExecutionRequest) (*sync.WaitGroup, string) {
+	if req.AuthenticatedUser == nil {
+		req.AuthenticatedUser = acl.UserGuest(req.Cfg)
+	}
+
 	req.executor = e
 	req.logEntry = &InternalLogEntry{
 		DatetimeStarted:     time.Now(),
@@ -193,6 +248,7 @@ func (e *Executor) ExecRequest(req *ExecutionRequest) (*sync.WaitGroup, string) 
 		ActionId:            "",
 		ActionTitle:         "notfound",
 		ActionIcon:          "&#x1f4a9;",
+		Username:            req.AuthenticatedUser.Username,
 	}
 
 	_, isDuplicate := e.GetLog(req.TrackingID)
@@ -227,7 +283,7 @@ func (e *Executor) execChain(req *ExecutionRequest) {
 
 	// This isn't a step, because we want to notify all listeners, irrespective
 	// of how many steps were actually executed.
-	notifyListeners(req)
+	notifyListenersFinished(req)
 }
 
 func getConcurrentCount(req *ExecutionRequest) int {
@@ -394,6 +450,8 @@ func stepRequestAction(req *ExecutionRequest) bool {
 		"tags":        req.Tags,
 	}).Infof("Action requested")
 
+	notifyListenersStarted(req)
+
 	return true
 }
 
@@ -419,9 +477,15 @@ func stepLogFinish(req *ExecutionRequest) bool {
 	return true
 }
 
-func notifyListeners(req *ExecutionRequest) {
+func notifyListenersFinished(req *ExecutionRequest) {
 	for _, listener := range req.executor.listeners {
 		listener.OnExecutionFinished(req.logEntry)
+	}
+}
+
+func notifyListenersStarted(req *ExecutionRequest) {
+	for _, listener := range req.executor.listeners {
+		listener.OnExecutionStarted(req.logEntry)
 	}
 }
 
@@ -448,10 +512,10 @@ func (ost *OutputStreamer) String() string {
 	return ost.output.String()
 }
 
-func buildEnv(req *ExecutionRequest) []string {
+func buildEnv(args map[string]string) []string {
 	ret := append(os.Environ(), "OLIVETIN=1")
 
-	for k, v := range req.Arguments {
+	for k, v := range args {
 		varName := fmt.Sprintf("%v", strings.TrimSpace(strings.ToUpper(k)))
 
 		// Skip arguments that might not have a name (eg, confirmation), as this causes weird bugs on Windows.
@@ -474,7 +538,7 @@ func stepExec(req *ExecutionRequest) bool {
 	cmd := wrapCommandInShell(ctx, req.finalParsedCommand)
 	cmd.Stdout = streamer
 	cmd.Stderr = streamer
-	cmd.Env = buildEnv(req)
+	cmd.Env = buildEnv(req.Arguments)
 
 	req.logEntry.ExecutionStarted = true
 
@@ -518,28 +582,39 @@ func stepExecAfter(req *ExecutionRequest) bool {
 	var stderr bytes.Buffer
 
 	args := map[string]string{
-		"output":   req.logEntry.Output,
-		"exitCode": fmt.Sprintf("%v", req.logEntry.ExitCode),
+		"output":                 req.logEntry.Output,
+		"exitCode":               fmt.Sprintf("%v", req.logEntry.ExitCode),
+		"ot_executionTrackingId": req.TrackingID,
+		"ot_username":            req.AuthenticatedUser.Username,
 	}
 
-	finalParsedCommand, _ := parseActionArguments(req.Action.ShellAfterCompleted, args, req.Action, req.logEntry.ActionTitle, req.EntityPrefix)
+	finalParsedCommand, _, err := parseCommandForReplacements(req.Action.ShellAfterCompleted, args)
+
+	if err != nil {
+		msg := "Could not prepare shellAfterCompleted command: " + err.Error() + "\n"
+		req.logEntry.Output += msg
+		log.Warnf(msg)
+		return true
+	}
 
 	cmd := wrapCommandInShell(ctx, finalParsedCommand)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
+	cmd.Env = buildEnv(args)
+
 	runerr := cmd.Start()
 
 	waiterr := cmd.Wait()
 
-	req.logEntry.Output += "\n" + stdout.String()
-	req.logEntry.Output += "OliveTin::shellAfterCompleted stdout\n" + stdout.String()
+	req.logEntry.Output += "\n"
+	req.logEntry.Output += "OliveTin::shellAfterCompleted stdout\n"
 	req.logEntry.Output += stdout.String()
 
-	req.logEntry.Output += "OliveTin::shellAfterCompleted stderr\n" + stdout.String()
+	req.logEntry.Output += "OliveTin::shellAfterCompleted stderr\n"
 	req.logEntry.Output += stderr.String()
 
-	req.logEntry.Output += "OliveTin::shellAfterCompleted errors and summary\n" + stdout.String()
+	req.logEntry.Output += "OliveTin::shellAfterCompleted errors and summary\n"
 	appendErrorToStderr(runerr, req.logEntry)
 	appendErrorToStderr(waiterr, req.logEntry)
 
@@ -549,15 +624,29 @@ func stepExecAfter(req *ExecutionRequest) bool {
 
 	req.logEntry.Output += fmt.Sprintf("Your shellAfterCompleted exited with code %v\n", cmd.ProcessState.ExitCode())
 
-	req.logEntry.Output += "OliveTin::shellAfterCompleted output complete\n" + stdout.String()
+	req.logEntry.Output += "OliveTin::shellAfterCompleted output complete\n"
 
 	return true
 }
 
 func stepTrigger(req *ExecutionRequest) bool {
-	if req.Action.Trigger != "" {
+	if req.Action.Triggers == nil {
+		return true
+	}
+
+	if len(req.Tags) > 0 && req.Tags[0] == "trigger" {
+		log.Warnf("Trigger action is triggering another trigger action. This is allowed, but be careful not to create trigger loops.")
+	}
+
+	triggerLoop(req)
+
+	return true
+}
+
+func triggerLoop(req *ExecutionRequest) {
+	for _, triggerReq := range req.Action.Triggers {
 		trigger := &ExecutionRequest{
-			ActionTitle:       req.Action.Trigger,
+			ActionTitle:       triggerReq,
 			TrackingID:        uuid.NewString(),
 			Tags:              []string{"trigger"},
 			AuthenticatedUser: req.AuthenticatedUser,
@@ -566,8 +655,6 @@ func stepTrigger(req *ExecutionRequest) bool {
 
 		req.executor.ExecRequest(trigger)
 	}
-
-	return true
 }
 
 func stepSaveLog(req *ExecutionRequest) bool {

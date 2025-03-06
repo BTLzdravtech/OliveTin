@@ -10,6 +10,8 @@ import {
 } from './js/marshaller.js'
 import { checkWebsocketConnection } from './js/websocket.js'
 
+import { LoginForm } from './js/LoginForm.js'
+
 function searchLogs (e) {
   document.getElementById('searchLogsClear').disabled = false
 
@@ -58,6 +60,10 @@ function fetchGetDashboardComponents () {
   window.fetch(window.restBaseUrl + 'GetDashboardComponents', {
     cors: 'cors'
   }).then(res => {
+    if (!res.ok && res.status === 403) {
+      return null
+    }
+
     return res.json()
   }).then(res => {
     if (!window.restAvailable) {
@@ -123,9 +129,43 @@ function processWebuiSettingsJson (settings) {
     if (titleElem) titleElem.innerText = window.pageTitle
   }
 
+  processAdditionalLinks(settings.AdditionalLinks)
+
+  const loginForm = new LoginForm()
+  loginForm.setup()
+  loginForm.processOAuth2Providers(settings.AuthOAuth2Providers)
+  loginForm.processLocalLogin(settings.AuthLocalLogin)
+
+  document.getElementsByTagName('main')[0].appendChild(loginForm)
+
   window.settings = settings
 
   refreshDiagnostics()
+}
+
+function processAdditionalLinks (links) {
+  if (links === null) {
+    return
+  }
+
+  if (links.length > 0) {
+    for (const link of links) {
+      const linkA = document.createElement('a')
+      linkA.href = link.Url
+      linkA.innerText = link.Title
+
+      if (link.Target === '') {
+        linkA.target = '_blank'
+      } else {
+        linkA.target = link.Target
+      }
+
+      const linkLi = document.createElement('li')
+      linkLi.appendChild(linkA)
+
+      document.getElementById('supplemental-links').prepend(linkLi)
+    }
+  }
 }
 
 function main () {

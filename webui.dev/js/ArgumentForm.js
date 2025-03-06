@@ -120,54 +120,71 @@ class ArgumentForm extends window.HTMLElement {
       for (const choice of arg.choices) {
         domEl.appendChild(this.createSelectOption(choice))
       }
-    } else if (arg.type === 'confirmation') {
-      this.domBtnStart.disabled = true
-
-      domEl = document.createElement('input')
-      domEl.setAttribute('type', 'checkbox')
-      domEl.onchange = () => {
-        this.domBtnStart.disabled = false
-        domEl.disabled = true
-      }
-    } else if (arg.type === 'datetime') {
-      domEl = document.createElement('input')
-      domEl.setAttribute('type', 'datetime-local')
-      domEl.setAttribute('step', '1')
-    } else if (arg.type === 'password') {
-      domEl = document.createElement('input')
-      domEl.setAttribute('type', 'password')
     } else {
-      domEl = document.createElement('input')
+      switch (arg.type) {
+        case 'html':
+          domEl = document.createElement('div')
+          domEl.innerHTML = arg.defaultValue
 
-      if (arg.type.startsWith('regex:')) {
-        domEl.setAttribute('pattern', arg.type.replace('regex:', ''))
-      }
+          return domEl
+        case 'confirmation':
+          this.domBtnStart.disabled = true
 
-      domEl.onchange = () => {
-        const validateArgumentTypeArgs = {
-          value: domEl.value,
-          type: arg.type
-        }
-
-        window.fetch(window.restBaseUrl + 'ValidateArgumentType', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify(validateArgumentTypeArgs)
-        }).then((res) => {
-          if (res.ok) {
-            return res.json()
-          } else {
-            throw new Error(res.statusText)
+          domEl = document.createElement('input')
+          domEl.setAttribute('type', 'checkbox')
+          domEl.onchange = () => {
+            this.domBtnStart.disabled = false
+            domEl.disabled = true
           }
-        }).then((json) => {
-          if (json.valid) {
-            domEl.setCustomValidity('')
-          } else {
-            domEl.setCustomValidity(json.description)
+          break
+        case 'raw_string_multiline':
+          domEl = document.createElement('textarea')
+          domEl.setAttribute('rows', '5')
+          domEl.style.resize = 'vertical'
+          break
+        case 'datetime':
+          domEl = document.createElement('input')
+          domEl.setAttribute('type', 'datetime-local')
+          domEl.setAttribute('step', '1')
+          break
+        case 'password':
+        case 'email':
+          domEl = document.createElement('input')
+          domEl.setAttribute('type', arg.type)
+          break
+        default:
+          domEl = document.createElement('input')
+
+          if (arg.type.startsWith('regex:')) {
+            domEl.setAttribute('pattern', arg.type.replace('regex:', ''))
           }
-        })
+
+          domEl.onchange = () => {
+            const validateArgumentTypeArgs = {
+              value: domEl.value,
+              type: arg.type
+            }
+
+            window.fetch(window.restBaseUrl + 'ValidateArgumentType', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(validateArgumentTypeArgs)
+            }).then((res) => {
+              if (res.ok) {
+                return res.json()
+              } else {
+                throw new Error(res.statusText)
+              }
+            }).then((json) => {
+              if (json.valid) {
+                domEl.setCustomValidity('')
+              } else {
+                domEl.setCustomValidity(json.description)
+              }
+            })
+          }
       }
     }
 

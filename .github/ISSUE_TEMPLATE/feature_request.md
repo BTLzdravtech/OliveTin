@@ -2,7 +2,9 @@
 name: Feature request
 about: Suggest an idea for this project
 title: ''
-labels: enhancement
+labels:
+  - "type: feature-request"
+  - "waiting-on-developer"
 assignees: ''
 
 ---

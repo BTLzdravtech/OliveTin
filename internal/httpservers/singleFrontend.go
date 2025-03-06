@@ -56,6 +56,10 @@ func StartSingleHTTPFrontend(cfg *config.Config) {
 		websocket.HandleWebsocket(w, r)
 	})
 
+	mux.HandleFunc("/oauth/login", handleOAuthLogin)
+
+	mux.HandleFunc("/oauth/callback", handleOAuthCallback)
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		logDebugRequest(cfg, "ui  ", r)
 
@@ -72,6 +76,8 @@ func StartSingleHTTPFrontend(cfg *config.Config) {
 			promProxy.ServeHTTP(w, r)
 		})
 	}
+
+	oauth2Init(cfg)
 
 	srv := &http.Server{
 		Addr:    cfg.ListenAddressSingleHTTPFrontend,

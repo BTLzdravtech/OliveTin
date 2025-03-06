@@ -2,17 +2,18 @@ package grpcapi
 
 import (
 	ctx "context"
+
 	pb "github.com/OliveTin/OliveTin/gen/grpc"
 	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"errors"
 	"net"
-	"sort"
 
 	acl "github.com/OliveTin/OliveTin/internal/acl"
 	config "github.com/OliveTin/OliveTin/internal/config"
@@ -75,12 +76,14 @@ func (api *oliveTinAPI) StartAction(ctx ctx.Context, req *pb.StartActionRequest)
 		return nil, status.Errorf(codes.NotFound, "Action not found.")
 	}
 
+	authenticatedUser := acl.UserFromContext(ctx, cfg)
+
 	execReq := executor.ExecutionRequest{
 		Action:            pair.Action,
 		EntityPrefix:      pair.EntityPrefix,
 		TrackingID:        req.UniqueTrackingId,
 		Arguments:         args,
-		AuthenticatedUser: acl.UserFromContext(ctx, cfg),
+		AuthenticatedUser: authenticatedUser,
 		Cfg:               cfg,
 	}
 
@@ -91,8 +94,47 @@ func (api *oliveTinAPI) StartAction(ctx ctx.Context, req *pb.StartActionRequest)
 	}, nil
 }
 
+func (api *oliveTinAPI) PasswordHash(ctx ctx.Context, req *pb.PasswordHashRequest) (*httpbody.HttpBody, error) {
+	hash, err := createHash(req.Password)
+
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Error creating hash.")
+	}
+
+	ret := &httpbody.HttpBody{
+		ContentType: "text/plain",
+		Data:        []byte("Your password hash is: " + hash),
+	}
+
+	return ret, nil
+}
+
+func (api *oliveTinAPI) LocalUserLogin(ctx ctx.Context, req *pb.LocalUserLoginRequest) (*pb.LocalUserLoginResponse, error) {
+	match := checkUserPassword(cfg, req.Username, req.Password)
+
+	if match {
+		grpc.SendHeader(ctx, metadata.Pairs("set-username", req.Username))
+
+		log.WithFields(log.Fields{
+			"username": req.Username,
+		}).Info("LocalUserLogin: User logged in successfully.")
+	} else {
+		log.WithFields(log.Fields{
+			"username": req.Username,
+		}).Warn("LocalUserLogin: User login failed.")
+	}
+
+	return &pb.LocalUserLoginResponse{
+		Success: match,
+	}, nil
+}
+
 func (api *oliveTinAPI) StartActionAndWait(ctx ctx.Context, req *pb.StartActionAndWaitRequest) (*pb.StartActionAndWaitResponse, error) {
 	args := make(map[string]string)
+
+	for _, arg := range req.Arguments {
+		args[arg.Name] = arg.Value
+	}
 
 	execReq := executor.ExecutionRequest{
 		Action:            api.executor.FindActionBindingByID(req.ActionId),
@@ -166,6 +208,7 @@ func internalLogEntryToPb(logEntry *executor.InternalLogEntry) *pb.LogEntry {
 		ActionId:            logEntry.ActionId,
 		DatetimeStarted:     logEntry.DatetimeStarted.Format("2006-01-02 15:04:05"),
 		DatetimeFinished:    logEntry.DatetimeFinished.Format("2006-01-02 15:04:05"),
+		DatetimeIndex:       logEntry.Index,
 		Output:              logEntry.Output,
 		TimedOut:            logEntry.TimedOut,
 		Blocked:             logEntry.Blocked,
@@ -174,6 +217,7 @@ func internalLogEntryToPb(logEntry *executor.InternalLogEntry) *pb.LogEntry {
 		ExecutionTrackingId: logEntry.ExecutionTrackingID,
 		ExecutionStarted:    logEntry.ExecutionStarted,
 		ExecutionFinished:   logEntry.ExecutionFinished,
+		User:                logEntry.Username,
 	}
 }
 
@@ -209,12 +253,13 @@ func (api *oliveTinAPI) ExecutionStatus(ctx ctx.Context, req *pb.ExecutionStatus
 
 	if req.ExecutionTrackingId != "" {
 		ile = getExecutionStatusByTrackingID(api, req.ExecutionTrackingId)
+
 	} else {
 		ile = getMostRecentExecutionStatusById(api, req.ActionId)
 	}
 
 	if ile == nil {
-		return nil, status.Errorf(codes.NotFound, "Execution not found.")
+		return nil, status.Error(codes.NotFound, "Execution not found")
 	} else {
 		res.LogEntry = internalLogEntryToPb(ile)
 	}
@@ -250,20 +295,37 @@ func (api *oliveTinAPI) WatchExecution(req *pb.WatchExecutionRequest, srv pb.Oli
 }
 */
 
+func (api *oliveTinAPI) Logout(ctx ctx.Context, req *pb.LogoutRequest) (*httpbody.HttpBody, error) {
+	user := acl.UserFromContext(ctx, cfg)
+
+	grpc.SendHeader(ctx, metadata.Pairs("logout-provider", user.Provider))
+	grpc.SendHeader(ctx, metadata.Pairs("logout-sid", user.SID))
+
+	return nil, nil
+}
+
 func (api *oliveTinAPI) GetDashboardComponents(ctx ctx.Context, req *pb.GetDashboardComponentsRequest) (*pb.GetDashboardComponentsResponse, error) {
 	user := acl.UserFromContext(ctx, cfg)
+
+	if user.IsGuest() && cfg.AuthRequireGuestsToLogin {
+		return nil, status.Errorf(codes.PermissionDenied, "Guests are not allowed to access the dashboard.")
+	}
 
 	res := buildDashboardResponse(api.executor, cfg, user)
 
 	if len(res.Actions) == 0 {
-		log.Warn("Zero actions found - check that you have some actions defined, with a view permission")
+		log.WithFields(log.Fields{
+			"username":         user.Username,
+			"usergroup":        user.Usergroup,
+			"provider":         user.Provider,
+			"acls":             user.Acls,
+			"availableActions": len(cfg.Actions),
+		}).Warn("Zero actions found for user")
 	}
 
 	log.Tracef("GetDashboardComponents: %v", res)
 
 	dashboardCfgToPb(res, cfg.Dashboards, cfg)
-
-	res.AuthenticatedUser = user.Username
 
 	return res, nil
 }
@@ -273,24 +335,20 @@ func (api *oliveTinAPI) GetLogs(ctx ctx.Context, req *pb.GetLogsRequest) (*pb.Ge
 
 	ret := &pb.GetLogsResponse{}
 
-	// TODO Limit to 10 entries or something to prevent browser lag.
+	logEntries, countRemaining := api.executor.GetLogTrackingIds(req.StartOffset, cfg.LogHistoryPageSize)
 
-	for trackingId, logEntry := range api.executor.GetLogsCopy() {
+	for _, logEntry := range logEntries {
 		action := cfg.FindAction(logEntry.ActionTitle)
 
 		if action == nil || acl.IsAllowedLogs(cfg, user, action) {
 			pbLogEntry := internalLogEntryToPb(logEntry)
-			pbLogEntry.ExecutionTrackingId = trackingId
 
 			ret.Logs = append(ret.Logs, pbLogEntry)
 		}
 	}
 
-	sorter := func(i, j int) bool {
-		return ret.Logs[i].DatetimeStarted < ret.Logs[j].DatetimeStarted
-	}
-
-	sort.Slice(ret.Logs, sorter)
+	ret.CountRemaining = countRemaining
+	ret.PageSize = cfg.LogHistoryPageSize
 
 	return ret, nil
 }
@@ -319,6 +377,10 @@ func (api *oliveTinAPI) WhoAmI(ctx ctx.Context, req *pb.WhoAmIRequest) (*pb.WhoA
 
 	res := &pb.WhoAmIResponse{
 		AuthenticatedUser: user.Username,
+		Usergroup:         user.Usergroup,
+		Provider:          user.Provider,
+		Sid:               user.SID,
+		Acls:              user.Acls,
 	}
 
 	log.Warnf("usergroup: %v", user.Usergroup)

@@ -7,6 +7,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"net/http"
 
 	gw "github.com/OliveTin/OliveTin/gen/grpc"
@@ -45,26 +46,102 @@ func parseHttpHeaderForAuth(req *http.Request) (string, string) {
 	return username[0], ""
 }
 
+//gocyclo:ignore
 func parseRequestMetadata(ctx context.Context, req *http.Request) metadata.MD {
 	username := ""
 	usergroup := ""
+	provider := "unknown"
+	sid := ""
 
 	if cfg.AuthJwtCookieName != "" {
 		username, usergroup = parseJwtCookie(req)
+		provider = "jwt-cookie"
 	}
 
-	if cfg.AuthHttpHeaderUsername != "" {
+	if cfg.AuthHttpHeaderUsername != "" && username == "" {
 		username, usergroup = parseHttpHeaderForAuth(req)
+		provider = "http-header"
+	}
+
+	if len(cfg.AuthOAuth2Providers) > 0 && username == "" {
+		username, usergroup, sid = parseOAuth2Cookie(req)
+		provider = "oauth2"
+	}
+
+	if cfg.AuthLocalUsers.Enabled && username == "" {
+		username, usergroup, sid = parseLocalUserCookie(req)
+		provider = "local"
 	}
 
 	md := metadata.New(map[string]string{
 		"username":  username,
 		"usergroup": usergroup,
+		"provider":  provider,
+		"sid":       sid,
 	})
 
 	log.Tracef("api request metadata: %+v", md)
 
 	return md
+}
+
+func forwardResponseHandler(ctx context.Context, w http.ResponseWriter, msg protoreflect.ProtoMessage) error {
+	md, ok := runtime.ServerMetadataFromContext(ctx)
+
+	if !ok {
+		log.Warn("Could not get ServerMetadata from context")
+		return nil
+	}
+
+	forwardResponseHandlerLoginLocalUser(md.HeaderMD, w)
+	forwardResponseHandlerLogout(md.HeaderMD, w)
+
+	return nil
+}
+
+func forwardResponseHandlerLogout(md metadata.MD, w http.ResponseWriter) {
+	if getMetadataKeyOrEmpty(md, "logout-provider") != "" {
+		sid := getMetadataKeyOrEmpty(md, "logout-sid")
+
+		delete(registeredStates, sid)
+		http.SetCookie(
+			w,
+			&http.Cookie{
+				Name:     "olivetin-sid-oauth",
+				MaxAge:   31556952, // 1 year
+				Value:    "",
+				HttpOnly: true,
+				Path:     "/",
+			},
+		)
+
+		deleteLocalUserSession("local", sid)
+
+		http.SetCookie(
+			w,
+			&http.Cookie{
+				Name:     "olivetin-sid-local",
+				MaxAge:   31556952, // 1 year
+				Value:    "",
+				HttpOnly: true,
+				Path:     "/",
+			},
+		)
+
+		w.Header().Set("Content-Type", "text/html")
+		// We cannot send a HTTP redirect here, because we don't have access to req.
+		w.Write([]byte("<script>window.location.href = '/';</script>"))
+	}
+}
+
+func getMetadataKeyOrEmpty(md metadata.MD, key string) string {
+	mdValues := md.Get(key)
+
+	if len(mdValues) > 0 {
+		return mdValues[0]
+	}
+
+	return ""
 }
 
 func SetGlobalRestConfig(config *config.Config) {
@@ -73,6 +150,8 @@ func SetGlobalRestConfig(config *config.Config) {
 
 func startRestAPIServer(globalConfig *config.Config) error {
 	cfg = globalConfig
+
+	loadUserSessions()
 
 	log.WithFields(log.Fields{
 		"address": cfg.ListenAddressRestActions,
@@ -87,6 +166,7 @@ func newMux() *runtime.ServeMux {
 	// The MarshalOptions set some important compatibility settings for the webui. See below.
 	mux := runtime.NewServeMux(
 		runtime.WithMetadata(parseRequestMetadata),
+		runtime.WithForwardResponseOption(forwardResponseHandler),
 		runtime.WithMarshalerOption(runtime.MIMEWildcard, &runtime.HTTPBodyMarshaler{
 			Marshaler: &runtime.JSONPb{
 				MarshalOptions: protojson.MarshalOptions{

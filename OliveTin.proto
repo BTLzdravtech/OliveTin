@@ -46,6 +46,7 @@ message GetDashboardComponentsResponse {
 	repeated DashboardComponent dashboards = 4;
 
 	string authenticated_user = 5;
+    string authenticated_user_provider = 6;
 }
 
 message GetDashboardComponentsRequest {}
@@ -77,6 +78,8 @@ message StartActionResponse {
 
 message StartActionAndWaitRequest {
 	string action_id = 1;
+
+	repeated StartActionArgument arguments = 2;
 }
 
 message StartActionAndWaitResponse {
@@ -99,7 +102,9 @@ message StartActionByGetAndWaitResponse {
 	LogEntry log_entry = 1;
 }
 
-message GetLogsRequest{};
+message GetLogsRequest{
+  int64 start_offset = 1;
+};
 
 message LogEntry {
 	string datetime_started = 1;
@@ -117,10 +122,13 @@ message LogEntry {
 	bool execution_started = 14;
 	bool execution_finished = 15;
 	bool blocked = 16;
+	int64 datetime_index = 17;
 }
 
 message GetLogsResponse {
 	repeated LogEntry logs = 1;
+	int64 count_remaining = 2;
+	int64 page_size = 3;
 }
 
 message ValidateArgumentTypeRequest {
@@ -154,6 +162,12 @@ message WhoAmIRequest {}
 
 message WhoAmIResponse {
 	string authenticated_user = 1;
+    string usergroup = 2;
+    string provider = 3;
+
+    repeated string acls = 4;
+
+    string sid = 5;
 }
 
 message SosReportRequest {}
@@ -198,6 +212,10 @@ message EventExecutionFinished {
 	LogEntry log_entry = 1;
 }
 
+message EventExecutionStarted {
+  LogEntry log_entry = 1;
+}
+
 message KillActionRequest {
 	string execution_tracking_id = 1;
 }
@@ -208,6 +226,24 @@ message KillActionResponse {
 	bool already_completed = 3;
 	bool found = 4;
 }
+
+message LocalUserLoginRequest {
+    string username = 1;
+    string password = 2;
+}
+
+message LocalUserLoginResponse {
+    bool success = 1;
+}
+
+message PasswordHashRequest {
+    string password = 1;
+}
+
+message PasswordHashResponse {
+}
+
+message LogoutRequest {}
 
 service OliveTinApiService {
 	rpc GetDashboardComponents(GetDashboardComponentsRequest) returns (GetDashboardComponentsResponse) {
@@ -298,4 +334,24 @@ service OliveTinApiService {
 			get: "/api/readyz"
 		};
 	}
+
+    rpc LocalUserLogin(LocalUserLoginRequest) returns (LocalUserLoginResponse) {
+        option (google.api.http) = {
+            post: "/api/LocalUserLogin"
+            body: "*"
+        };
+    }
+
+    rpc PasswordHash(PasswordHashRequest) returns (google.api.HttpBody) {
+        option (google.api.http) = {
+            post: "/api/PasswordHash"
+            body: "*"
+        };
+    }
+
+    rpc Logout(LogoutRequest) returns (google.api.HttpBody) {
+        option (google.api.http) = {
+            get: "/api/Logout"
+        };
+    }
 }
